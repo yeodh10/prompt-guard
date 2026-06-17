@@ -158,3 +158,64 @@ def scan(text: str) -> dict:
         "hits": hits,
         "signals": {"zero_width": zero_width, "encoded": encoded, "length": len(text)},
     }
+
+
+def _try_decode(token: str) -> str | None:
+    """base64 토큰을 사람이 읽을 수 있는 문자열로 디코딩(아니면 None)."""
+    if len(token) < 20:
+        return None
+    try:
+        pad = token + "=" * (-len(token) % 4)
+        txt = base64.b64decode(pad, validate=False).decode("utf-8", errors="strict")
+    except Exception:
+        return None
+    if not txt or len(txt) < 6:
+        return None
+    printable = sum(c.isprintable() or c.isspace() for c in txt)
+    return txt if printable / max(1, len(txt)) > 0.85 else None
+
+
+def _decoded_is_attack(dec: str) -> bool:
+    return any(
+        cat in (C_OVERRIDE, C_LEAK, C_ROLEPLAY, C_EXFIL) and rx.search(dec)
+        for rx, cat, _w, _d in _SIGNATURES
+    )
+
+
+def detect_spans(text: str) -> list[dict]:
+    """탐지된 악성 '구간'을 원문 문자 오프셋으로 돌려준다(인라인 하이라이트용).
+
+    겹치는 구간은 병합하고, 그 구간 색은 가장 높은 가중치 시그니처의 카테고리를 따른다.
+    Returns: [{"start": int, "end": int, "category": str, "weight": int} ...] (start 오름차순)
+    """
+    text = text or ""
+    raw: list[tuple[int, int, str, int]] = []
+
+    for rx, cat, w, _desc in _SIGNATURES:
+        for m in rx.finditer(text):
+            if m.end() > m.start():
+                raw.append((m.start(), m.end(), cat, w))
+
+    # base64로 숨긴 공격: 원문에서 그 토큰 위치를 하이라이트
+    for m in _B64.finditer(text):
+        dec = _try_decode(m.group(0))
+        if dec and _decoded_is_attack(dec):
+            raw.append((m.start(), m.end(), C_ENCODE, 60))
+
+    # 제로폭 문자 각각도 구간으로
+    for m in _ZERO_WIDTH.finditer(text):
+        raw.append((m.start(), m.end(), C_ENCODE, 25))
+
+    if not raw:
+        return []
+
+    raw.sort()
+    merged: list[list] = []
+    for s, e, cat, w in raw:
+        if merged and s <= merged[-1][1]:
+            if w > merged[-1][3]:
+                merged[-1][2], merged[-1][3] = cat, w
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e, cat, w])
+    return [{"start": s, "end": e, "category": c, "weight": w} for s, e, c, w in merged]
