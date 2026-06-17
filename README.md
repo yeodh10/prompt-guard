@@ -9,7 +9,7 @@
 핵심은 단일 분류기가 아니라 **다층 방어(defense-in-depth)** 입니다.
 
 <!-- 배포 후 링크 추가 -->
-**🔗 라이브 데모:** _(배포 후 링크 추가)_
+**🔗 라이브 데모: https://yeodh10-prompt-guard.streamlit.app/**
 
 ![스크린샷](docs/screenshot.png)
 
