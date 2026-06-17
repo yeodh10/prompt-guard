@@ -1,0 +1,3 @@
+# 개발/테스트 의존성 (런타임엔 불필요)
+-r requirements.txt
+pytest>=8.0

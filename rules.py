@@ -14,6 +14,8 @@ from __future__ import annotations
 import base64
 import re
 
+import normalize
+
 # ── 시그니처 카테고리(한글 라벨) ───────────────────────────────
 C_OVERRIDE = "지시 무시/덮어쓰기"
 C_LEAK = "시스템 프롬프트 탈취"
@@ -28,8 +30,9 @@ C_URGENCY = "긴급·압박(사회공학)"
 _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     # 지시 무시 — 가장 전형적인 인젝션
     (r"ignore\s+(all\s+|the\s+)?(previous|above|prior|earlier)\s+(instructions?|prompts?|messages?)", C_OVERRIDE, 50, "이전 지시 무시 요구"),
-    (r"disregard\s+(the\s+|all\s+)?(above|previous|prior|instructions?|rules?)", C_OVERRIDE, 45, "이전 지시 무효화"),
-    (r"forget\s+(everything|all|your\s+(instructions?|rules?|guidelines?))", C_OVERRIDE, 40, "지시 망각 요구"),
+    (r"disregard\s+(the\s+|all\s+|everything\s+)?(that\s+was\s+|stated\s+|said\s+|written\s+)?(above|previous|prior|earlier|before|instructions?|rules?)", C_OVERRIDE, 45, "이전 지시 무효화"),
+    (r"forget\s+(everything|all\s+|the\s+|your\s+)?(instructions?|rules?|guidelines?|directives?|prompts?)", C_OVERRIDE, 40, "지시 망각 요구"),
+    (r"(pay\s+no\s+attention\s+to|do\s+not\s+follow|stop\s+following)\s+(the\s+)?(above|previous|earlier|prior|instructions?|rules?)", C_OVERRIDE, 45, "이전 지시 따르지 말 것 요구"),
     (r"(이전|앞|위)(의|에)?\s*(지시|명령|규칙|프롬프트|내용).{0,8}(무시|잊|무효)", C_OVERRIDE, 50, "이전 지시 무시(한국어)"),
     (r"무시(하고|해)\s*(새로운|아래|다음)", C_OVERRIDE, 35, "무시하고 새 지시 따르기"),
     (r"override\s+(your|the|all|system)\s+(instructions?|rules?|settings?|prompt)", C_OVERRIDE, 45, "설정 덮어쓰기"),
@@ -133,16 +136,26 @@ def scan(text: str) -> dict:
         if m:
             add(cat, w, desc, _snippet(text, m))
 
-    # 2) 인코딩 우회: base64 디코딩 후 핵심 패턴 재검사
+    # 2) 역난독화: 정규화·리트스피크·공백복원·인코딩 디코드 뷰에서 시그니처 재검사
+    #    (평문에서 이미 잡힌 시그니처는 건너뛰어 이중 가산을 막는다)
+    raw_keys = set(seen_cat_desc)
+    deobf_added: set = set()
     encoded = False
-    for dec in _decode_b64_candidates(text):
-        for rx, cat, w, desc in _SIGNATURES:
-            if cat in (C_OVERRIDE, C_LEAK, C_ROLEPLAY, C_EXFIL) and rx.search(dec):
+    views = normalize.deobfuscated_views(text)
+    for rx, cat, w, desc in _SIGNATURES:
+        if cat not in (C_OVERRIDE, C_LEAK, C_ROLEPLAY, C_EXFIL, C_REFUSAL):
+            continue
+        if (cat, desc) in raw_keys or (cat, desc) in deobf_added:
+            continue
+        for label, view in views:
+            if rx.search(view):
                 encoded = True
-                add(C_ENCODE, 60, f"base64로 숨긴 공격: {desc}", dec[:40] + ("…" if len(dec) > 40 else ""))
+                deobf_added.add((cat, desc))
+                add(cat, w, f"{desc} (난독 우회: {label})",
+                    view[:48] + ("…" if len(view) > 48 else ""))
                 break
 
-    # 3) 제로폭/난독화 신호
+    # 3) 제로폭/보이지 않는 문자(그 자체로 난독화 시도 신호)
     zero_width = bool(_ZERO_WIDTH.search(text))
     if zero_width:
         add(C_ENCODE, 25, "보이지 않는 제로폭 문자(난독화)", "(zero-width chars)")

@@ -3,6 +3,7 @@ venv/
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # 비밀정보 (절대 커밋 금지)
 .env
