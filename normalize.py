@@ -40,6 +40,10 @@ _LEET = str.maketrans(
 
 # 단어 '안'의 단일문자+단일공백 분산만 합침(2칸 이상 공백 = 단어 경계로 보존)
 _DESPACE_RUN = re.compile(r"(?:(?<=\s)|^)((?:[^\W_] ){2,}[^\W_])(?=\s|$)")
+# CJK(한글·한자·가나) 글자 '사이'에만 낀 공백 — '비 밀 번 호'식 띄어쓰기 난독화 복원용.
+# 한쪽이라도 비CJK(라틴/숫자)면 손대지 않아 일반 문장의 단어 경계는 보존된다.
+_CJK = "가-힣ᄀ-ᇿ㄰-㆏一-鿿぀-ヿㇰ-ㇿ"
+_CJK_SPACE = re.compile(rf"(?<=[{_CJK}])[ \t ]+(?=[{_CJK}])")
 _B64 = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
 _HEX = re.compile(r"(?:[0-9a-fA-F]{2}){8,}")
 
@@ -65,6 +69,16 @@ def despace(s: str) -> str:
     for part in re.split(r"\s{2,}", s):
         out.append(_DESPACE_RUN.sub(lambda m: m.group(1).replace(" ", ""), part))
     return " ".join(out)
+
+
+def collapse_cjk_spaces(s: str) -> str:
+    """'비 밀 번 호' → '비밀번호'. CJK 글자 사이의 공백만 제거(라틴/숫자 경계는 보존).
+
+    한국어는 본래 단어를 띄어 쓰므로 일반 문장도 일부 붙지만('다음 주'→'다음주'),
+    이 함수의 결과는 시그니처 '재검사용 뷰'로만 쓰여 원문 가독성에는 영향이 없다.
+    despace()가 못 잡는 '부분 띄어쓰기'(예: '이 전 프롬프트')를 보완한다.
+    """
+    return _CJK_SPACE.sub("", s or "")
 
 
 def _decoded(text: str) -> list[str]:
@@ -116,6 +130,7 @@ def deobfuscated_views(text: str) -> list[tuple[str, str]]:
 
     add("정규화(유니코드/동형문자/제로폭)", base)
     add("공백분산 복원", despace(base))
+    add("CJK 공백분산 복원", collapse_cjk_spaces(base))
     add("리트스피크 복원", base.translate(_LEET))
     add("공백+리트 복원", despace(base).translate(_LEET))
     for d in _decoded(text):
