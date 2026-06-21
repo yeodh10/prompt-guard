@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import config
 import detector
+import egress
 import rules
 
 # 판정 → (이모지, 색). app.py 다크 테마와 맞춤.
@@ -81,3 +82,13 @@ def evaluate(text: str, use_llm: bool = True) -> dict:
         "reasons": reasons,
         "layers": {"rule": rule_fired, "llm": llm_inj},
     }
+
+
+def screen_output(text: str, system_prompt: str | None = None) -> dict:
+    """출력측 방어 — 모델 출력/검색 청크가 밖으로 나가기 전에 PII·시크릿·유출 채널·
+    시스템 프롬프트 유출을 잡아 마스킹한다. (egress.screen 래퍼 — 입력 가드와 한 진입점)
+
+    RAG 연동: 입력은 evaluate()로, 출력/검색 청크는 screen_output()으로 거른다.
+    입력 탐지가 100%가 아니어도 여기서 실제 유출을 봉쇄한다(피해 차단).
+    """
+    return egress.screen(text, system_prompt=system_prompt)
