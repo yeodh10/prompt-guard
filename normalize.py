@@ -55,8 +55,13 @@ def _printable(s: str) -> bool:
     return ok / len(s) > 0.85
 
 
+# 변이 선택자(VS, U+FE00–FE0F)·VS 보충·태그 문자(U+E0000–E01EF) — 보이지 않게 글자
+# 사이에 끼워 'i︀gnore'처럼 시그니처를 깨는 스머글링. 정규화 시 함께 제거한다.
+_VS_TAGS = re.compile("[︀-️\U000E0000-\U000E01EF]")
+
+
 def strip_invisible(s: str) -> str:
-    return _INVISIBLE.sub("", s)
+    return _VS_TAGS.sub("", _INVISIBLE.sub("", s))
 
 
 def fold_homoglyph(s: str) -> str:

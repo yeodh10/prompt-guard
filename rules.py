@@ -107,6 +107,8 @@ _SIGNATURES = [
 
 # 제로폭/보이지 않는 문자(난독화에 자주 쓰임)
 _ZERO_WIDTH = re.compile(r"[​‌‍⁠﻿­]")
+# 변이 선택자(VS)·태그 문자 — 제로폭처럼 글자 사이에 끼우는 스머글링(난독화 신호)
+_VS_TAGS = re.compile("[︀-️\U000E0000-\U000E01EF]")
 # base64로 의심되는 긴 토큰
 _B64 = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
 
@@ -189,7 +191,7 @@ def scan(text: str) -> dict:
                 break
 
     # 3) 제로폭/보이지 않는 문자(그 자체로 난독화 시도 신호)
-    zero_width = bool(_ZERO_WIDTH.search(text))
+    zero_width = bool(_ZERO_WIDTH.search(text) or _VS_TAGS.search(text))
     if zero_width:
         add(C_ENCODE, 25, "보이지 않는 제로폭 문자(난독화)", "(zero-width chars)")
 
