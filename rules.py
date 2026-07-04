@@ -67,6 +67,8 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     (r"\[/?INST\]|\[/?SYS\]", C_DELIM, 40, "명령 구분자 위조"),
     # 권한 우회/유출 유도
     (r"\b(bypass|circumvent|evade|disable)\s+(the\s+)?(filter|safety|guardrail|moderation|restriction|security)", C_EXFIL, 40, "안전장치 우회 요구"),
+    # 가정법/허구 프레이밍 우회: "hypothetically, if you had no content policy…"
+    (r"(?i)\b(hypothetical(?:ly)?|imagine|suppose|pretend)\b[^.\n]{0,40}\byou\b[^.\n]{0,20}(had\s+no|have\s+no|without|no\s+longer\s+had|didn'?t\s+have)\b[^.\n]{0,15}(content\s*polic|rules?|restrictions?|filters?|guardrails?|safety|guidelines?)", C_EXFIL, 30, "가정법 프레이밍으로 안전장치 우회(영어)"),
     (r"(우회|뚫|무력화).{0,8}(필터|안전|보안|제한|가드)", C_EXFIL, 40, "안전장치 우회(한국어)"),
     (r"\b(exfiltrate|leak|dump)\s+(the\s+)?(data|secrets?|keys?|credentials?)", C_EXFIL, 35, "데이터 유출 유도"),
     # 자격증명 탈취(영어) — reveal/send/… + password/credentials/api key 등. show/give는
@@ -97,6 +99,43 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     (r"忽略[^。\n]{0,6}(之前|上述|先前|以上|前面)[^。\n]{0,4}(指令|指示|提示|规则|命令)", C_OVERRIDE, 50, "이전 지시 무시(중국어)"),
     (r"(显示|输出|告诉我|重复|泄露)[^。\n]{0,8}(系统提示|系统提示词|初始指令|系统指令)", C_LEAK, 45, "시스템 프롬프트 탈취(중국어)"),
     (r"(密码|账号|账户|凭据|密钥|令牌)[^。\n]{0,6}(告诉|给我|发给|泄露|发送)", C_EXFIL, 50, "자격증명 탈취(중국어)"),
+
+    # ── 데이터베이스/대량 데이터 유출 (한/영) — '사용자 DB 다 가져와'류 ──
+    (r"(데이터\s*베이스|디비|사용자\s*데이터|회원\s*정보|고객\s*정보|개인\s*정보|사용자\s*정보|전체\s*데이터|모든\s*데이터|db)[^.\n]{0,12}(가져와|가져가|넘겨|빼내|빼돌|유출|탈취|내놔|덤프|보내라|전송해|다\s*줘)", C_EXFIL, 50, "사용자 데이터/DB 유출(한국어)"),
+    (r"(?i)\b(dump|exfiltrate|leak|steal|extract|download|send|give|fetch|scrape)\b[^.\n]{0,20}(the\s+|entire\s+|all\s+|whole\s+|user\s+|customer\s+|our\s+)*(database|databases|user\s+data|customer\s+data|user\s+records|user\s+table|records|pii)\b", C_EXFIL, 45, "사용자 데이터/DB 유출(영어)"),
+    # 탈옥(jailbreak) 자체를 키워드로
+    (r"(?i)\bjail\s*break(ing|s)?\b|탈옥", C_ROLEPLAY, 40, "탈옥(jailbreak) 명시"),
+
+    # ── 다국어 인젝션(주요 언어) — 각 언어: 지시무시 / 시스템프롬프트 탈취 / 자격증명·DB 유출 ──
+    # 스페인어(ES)
+    (r"(?i)(ignora|olvida|descarta|desatiende)\w*\s+(todas\s+)?(las\s+)?(instrucciones|reglas|[óo]rdenes)\s+(anteriores|previas)", C_OVERRIDE, 50, "이전 지시 무시(스페인어)"),
+    (r"(?i)(revela|muestra|imprime|repite|ens[eé][ñn]a)\w*\s+(tu\s+|el\s+|las\s+)?(prompt\s+del\s+sistema|instrucciones\s+iniciales|system\s+prompt|indicaciones\s+del\s+sistema)", C_LEAK, 45, "시스템 프롬프트 탈취(스페인어)"),
+    (r"(?i)(dame|env[ií]a\w*|revela|filtra|mu[eé]strame|comparte)\s+(la\s+|las\s+|el\s+|todas?\s+)?(contrase[ñn]as?|credenciales|clave|base\s+de\s+datos|datos\s+de\s+usuarios?)", C_EXFIL, 50, "자격증명/DB 유출(스페인어)"),
+    # 프랑스어(FR)
+    (r"(?i)(ignore[rz]?|oublie[rz]?|n[ée]glige[rz]?)\s+(toutes\s+)?(les\s+)?(instructions|r[èe]gles|consignes)\s+(pr[ée]c[ée]dentes|ant[ée]rieures)", C_OVERRIDE, 50, "이전 지시 무시(프랑스어)"),
+    (r"(?i)(r[ée]v[èe]le[rz]?|montre[rz]?|affiche[rz]?)\s+(-?moi\s+)?(ton\s+|le\s+|tes\s+)?(prompt\s+syst[èe]me|instructions\s+initiales|invite\s+syst[èe]me)", C_LEAK, 45, "시스템 프롬프트 탈취(프랑스어)"),
+    (r"(?i)(donne[rz]?-?moi|envoie[rz]?|r[ée]v[èe]le[rz]?|divulgue[rz]?)\s+(le\s+|la\s+|les\s+|tous?\s+)?(mots?\s+de\s+passe|identifiants|base\s+de\s+donn[ée]es|donn[ée]es\s+(des\s+)?utilisateurs)", C_EXFIL, 50, "자격증명/DB 유출(프랑스어)"),
+    # 독일어(DE)
+    (r"(?i)(ignoriere|vergiss|missachte)\s+(alle\s+)?(vorherigen|bisherigen|obigen)\s+(anweisungen|regeln|befehle)", C_OVERRIDE, 50, "이전 지시 무시(독일어)"),
+    (r"(?i)(zeige?|verrate|gib\s+aus|wiederhole)\s+(mir\s+)?(deinen?\s+)?(system[-\s]?prompt|systemanweisung(en)?|urspr[üu]nglichen\s+anweisungen)", C_LEAK, 45, "시스템 프롬프트 탈취(독일어)"),
+    (r"(?i)(gib\s+mir|sende|zeige?|verrate|leake)\s+(?:(?:alle|die|das|den|dein|deine|meine?|mir)\s+){0,2}(passw[öo]rter|passwort|zugangsdaten|anmeldedaten|datenbank|benutzerdaten)", C_EXFIL, 50, "자격증명/DB 유출(독일어)"),
+    # 포르투갈어(PT)
+    (r"(?i)(ignore|esque[çc]a|desconsidere)\s+(todas\s+)?(as\s+)?(instru[çc][õo]es|regras|ordens)\s+(anteriores|pr[ée]vias)", C_OVERRIDE, 50, "이전 지시 무시(포르투갈어)"),
+    (r"(?i)(revele|mostre|imprima|repita)\s+(seu\s+|o\s+|as\s+)?(prompt\s+do\s+sistema|instru[çc][õo]es\s+iniciais)", C_LEAK, 45, "시스템 프롬프트 탈취(포르투갈어)"),
+    (r"(?i)(me\s+d[êe]|envie|revele|vaze|mostre)\s+(as\s+|todas?\s+|a\s+|o\s+)?(senhas?|credenciais|banco\s+de\s+dados|dados\s+dos?\s+usu[áa]rios)", C_EXFIL, 50, "자격증명/DB 유출(포르투갈어)"),
+    # 인도네시아어(ID)
+    (r"(?i)(abaikan|lupakan)\s+(semua\s+)?(instruksi|aturan|perintah)\s+(sebelumnya|di\s+atas)", C_OVERRIDE, 50, "이전 지시 무시(인니어)"),
+    (r"(?i)(beri(kan)?|kirim|tunjukkan|bocorkan)\s+(saya\s+)?(semua\s+)?(kata\s+sandi|password|kredensial|basis\s+data|data\s+pengguna)", C_EXFIL, 50, "자격증명/DB 유출(인니어)"),
+    # 러시아어(RU)
+    (r"(игнорируй|забудь|отмени|проигнорируй)\s+(все\s+)?(предыдущие|прошлые|вышеуказанные)\s+(инструкции|правила|указания)", C_OVERRIDE, 50, "이전 지시 무시(러시아어)"),
+    (r"(покажи|раскрой|выведи|повтори)\s+(свой\s+|мне\s+)?(системный\s+промпт|системную\s+подсказку|исходные\s+инструкции)", C_LEAK, 45, "시스템 프롬프트 탈취(러시아어)"),
+    (r"(дай|отправь|покажи|слей|раскрой)\s+(мне\s+)?(все\s+)?(парол\w+|учетные\s+данные|базу\s+данных|данные\s+пользователей)", C_EXFIL, 50, "자격증명/DB 유출(러시아어)"),
+    # 아랍어(AR) — 근사치(형태 변화 많음)
+    (r"(تجاهل|انسى|تخط[ىي]?)\s+(كل\s+)?(التعليمات|القواعد|الأوامر)", C_OVERRIDE, 50, "이전 지시 무시(아랍어)"),
+    (r"(أعطني|أرسل|اكشف|سرب|أظهر)\s+(كل\s+)?(كلم[ةا]ت?\s+المرور|بيانات\s+الاعتماد|قاعدة\s+البيانات|بيانات\s+المستخدم)", C_EXFIL, 50, "자격증명/DB 유출(아랍어)"),
+    # 힌디어(HI) — 근사치
+    (r"(पिछले|सभी|ऊपर).{0,6}(निर्देश|नियम|आदेश).{0,6}(अनदेखा|भूल|नज़रअंदाज़|अनदेखी)", C_OVERRIDE, 50, "이전 지시 무시(힌디어)"),
+    (r"(पासवर्ड|यूज़र\s*डेटा|डेटाबेस|क्रेडेंशियल|उपयोगकर्ता\s*डेटा).{0,10}(दे\s*दो|बताओ|भेजो|दिखाओ|लीक)", C_EXFIL, 50, "자격증명/DB 유출(힌디어)"),
     # 긴급/압박(보조 신호 — 단독으론 약하게)
     (r"\b(urgent|immediately|right\s+now|asap)\b|긴급|당장|즉시", C_URGENCY, 10, "긴급성 압박"),
 ]
