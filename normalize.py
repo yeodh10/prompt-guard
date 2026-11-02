@@ -39,13 +39,14 @@ _LEET = str.maketrans(
 )
 
 # 단어 '안'의 단일문자+단일공백 분산만 합침(2칸 이상 공백 = 단어 경계로 보존)
-_DESPACE_RUN = re.compile(r"(?:(?<=\s)|^)((?:[^\W_] ){2,}[^\W_])(?=\s|$)")
+_DESPACE_RUN = re.compile(r"(?:(?<=\s)|^)((?:[^\W_] ){2,400}[^\W_])(?=\s|$)")
 # CJK(한글·한자·가나) 글자 '사이'에만 낀 공백 — '비 밀 번 호'식 띄어쓰기 난독화 복원용.
 # 한쪽이라도 비CJK(라틴/숫자)면 손대지 않아 일반 문장의 단어 경계는 보존된다.
 _CJK = "가-힣ᄀ-ᇿ㄰-㆏一-鿿぀-ヿㇰ-ㇿ"
 _CJK_SPACE = re.compile(rf"(?<=[{_CJK}])[ \t ]+(?=[{_CJK}])")
-_B64 = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
-_HEX = re.compile(r"(?:[0-9a-fA-F]{2}){8,}")
+_B64 = re.compile(r"[A-Za-z0-9+/]{16,4096}={0,2}")
+_HEX = re.compile(r"(?:[0-9a-fA-F]{2}){8,4096}")
+_RUN = re.compile(r"\s{3,}")  # 공백 한 종류만 보는 반복이라 되돌아갈 일이 없다
 
 
 def _printable(s: str) -> bool:
@@ -58,6 +59,14 @@ def _printable(s: str) -> bool:
 # 변이 선택자(VS, U+FE00–FE0F)·VS 보충·태그 문자(U+E0000–E01EF) — 보이지 않게 글자
 # 사이에 끼워 'i︀gnore'처럼 시그니처를 깨는 스머글링. 정규화 시 함께 제거한다.
 _VS_TAGS = re.compile("[︀-️\U000E0000-\U000E01EF]")
+
+
+def squeeze(s: str) -> str:
+    """빈 줄을 없애고 공백 덩어리를 2칸으로 줄인다. 정규식 시간이 공백 길이에 끌려가지 않게 하는 첫 단계다.
+
+    2칸은 남긴다. despace()가 그것을 단어 경계로 쓴다.
+    """
+    return "\n".join(line for line in (_RUN.sub("  ", raw.strip()) for raw in s.splitlines()) if line)
 
 
 def strip_invisible(s: str) -> str:
@@ -124,7 +133,7 @@ def canonical(text: str) -> str:
 def deobfuscated_views(text: str) -> list[tuple[str, str]]:
     """원문을 제외한 역난독화 후보를 (방법라벨, 텍스트)로 반환(중복 제거)."""
     text = text or ""
-    base = canonical(text)
+    base = squeeze(canonical(text))
     pairs: list[tuple[str, str]] = []
     seen: set[str] = {text}
 
@@ -139,9 +148,10 @@ def deobfuscated_views(text: str) -> list[tuple[str, str]]:
     add("리트스피크 복원", base.translate(_LEET))
     add("공백+리트 복원", despace(base).translate(_LEET))
     for d in _decoded(text):
+        d = squeeze(d)
         add("인코딩 디코드", d)
         # 디코드 결과도 한 번 더 역난독화
-        db = canonical(d)
+        db = squeeze(canonical(d))
         add("디코드+정규화", db)
         add("디코드+리트", db.translate(_LEET))
     return pairs

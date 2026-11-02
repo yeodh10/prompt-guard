@@ -81,6 +81,7 @@ CAT_META = {
     rules.C_ENCODE:   ("OBF-ENC", "#3DDC97"),   # 인코딩/난독 우회
     rules.C_URGENCY:  ("SOC-URG", "#9AA3B2"),   # 긴급·압박
     rules.C_INDIRECT: ("RAG-INJ", "#2DD4BF"),   # 간접 주입(RAG/문서 내 지시)
+    rules.C_LIMIT:    ("LIM-OVR", "#9AA3B2"),   # 길이/시간 상한 초과
 }
 _DEFAULT_CAT = ("SIG-GEN", "#9AA3B2")
 

@@ -46,8 +46,10 @@ def evaluate(text: str, use_llm: bool = True, fail_closed: bool = False) -> dict
     text = text or ""
     rule = rules.scan(text)
 
+    # 끝까지 보지 못한 글은 이미 막혔다. 길이 상한을 넘은 글을 LLM에 보내지 않는다
+    unread = rule["signals"]["oversize"] or rule["signals"]["timed_out"]
     llm = None
-    if use_llm and config.has_anthropic_key():
+    if use_llm and not unread and config.has_anthropic_key():
         llm = detector.classify(text)
 
     llm_ok = bool(llm and llm.get("ok"))

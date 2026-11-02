@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import re
+import time
 
 import normalize
 
@@ -26,6 +27,7 @@ C_EXFIL = "권한 우회/유출 유도"
 C_ENCODE = "인코딩/난독 우회"
 C_URGENCY = "긴급·압박(사회공학)"
 C_INDIRECT = "간접 주입(RAG/문서 내 지시)"
+C_LIMIT = "검사 한도 초과"
 
 # (정규식, 카테고리, 가중치, 설명). 대소문자 무시. 한·영 동시 대응.
 _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
@@ -38,7 +40,7 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     # 삭제형 덮어쓰기: '(이전/위) 지시·프롬프트를 지우고…' — 무시 대신 '삭제' 동사. 접두(이전/위/앞)는
     # 선택적(없어도 매칭) — '프롬프트 다 지우고'처럼 접두 없는 변형도 잡는다. 명사는 지시/명령/규칙/
     # 프롬프트로 한정(대화/기록 제외 — '이전 대화 기록 삭제'는 정상 기능 문의라 오탐 위험).
-    (r"(이\s*전|위|앞|기존|현재)?\s*(의|에)?\s*(지시|명령|규칙|시스템\s*프롬프트|프롬프트)\s*(을|를|들|다|싹|전부|모두)?\s*.{0,6}(지우|지워|삭제|제거|없애|날려|초기화|리셋|클리어)", C_OVERRIDE, 45, "지시/프롬프트 삭제 요구(한국어)"),
+    (r"(지시|명령|규칙|시스템\s*프롬프트|프롬프트)\s*(을|를|들|다|싹|전부|모두)?\s*.{0,6}(지우|지워|삭제|제거|없애|날려|초기화|리셋|클리어)", C_OVERRIDE, 45, "지시/프롬프트 삭제 요구(한국어)"),
     (r"무시(하고|해)\s*(새로운|아래|다음)", C_OVERRIDE, 35, "무시하고 새 지시 따르기"),
     (r"override\s+(your|the|all|system)\s+(instructions?|rules?|settings?|prompt)", C_OVERRIDE, 45, "설정 덮어쓰기"),
     # 시스템 프롬프트 탈취
@@ -63,7 +65,7 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     # 구분자/역할 마크업 위조
     (r"</?(system|assistant|user|im_start|im_end)\s*\|?>?", C_DELIM, 40, "역할 태그 위조"),
     (r"<\|(im_start|im_end|system|endoftext)\|>", C_DELIM, 45, "특수 토큰 위조"),
-    (r"(^|\n)\s*(###|\[)?\s*(system|assistant)\s*[:\]]", C_DELIM, 30, "가짜 시스템/어시스턴트 턴"),
+    (r"(?m)^[ \t]{0,3}(?:###[ \t]{0,3}|\[[ \t]{0,3})?(?:system|assistant)\s*[:\]]", C_DELIM, 30, "가짜 시스템/어시스턴트 턴"),
     (r"\[/?INST\]|\[/?SYS\]", C_DELIM, 40, "명령 구분자 위조"),
     # 권한 우회/유출 유도
     (r"\b(bypass|circumvent|evade|disable)\s+(the\s+)?(filter|safety|guardrail|moderation|restriction|security)", C_EXFIL, 40, "안전장치 우회 요구"),
@@ -73,14 +75,14 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     (r"\b(exfiltrate|leak|dump)\s+(the\s+)?(data|secrets?|keys?|credentials?)", C_EXFIL, 35, "데이터 유출 유도"),
     # 자격증명 탈취(영어) — reveal/send/… + password/credentials/api key 등. show/give는
     # 일반 UI 문맥('show password' 토글) 오탐 우려로 제외, 유출성 동사만 채택.
-    (r"\b(reveal|send|hand|fetch|expose|leak|dump|steal|exfiltrate|give|tell|show)\s+(me\s+|us\s+)?(all\s+|the\s+|your\s+|every\s+|any\s+|stored\s+|saved\s+)*(passwords?|credentials?|api[\s_-]*keys?|secret[\s_-]*keys?|access[\s_-]*tokens?|private[\s_-]*keys?|login\s+credentials?)\b", C_EXFIL, 50, "자격증명/키 탈취 요구(영어)"),
+    (r"\b(reveal|send|hand|fetch|expose|leak|dump|steal|exfiltrate|give|tell|show)\s+(me\s+|us\s+)?(all\s+|the\s+|your\s+|every\s+|any\s+|stored\s+|saved\s+){0,6}(passwords?|credentials?|api[\s_-]{0,3}keys?|secret[\s_-]{0,3}keys?|access[\s_-]{0,3}tokens?|private[\s_-]{0,3}keys?|login\s+credentials?)\b", C_EXFIL, 50, "자격증명/키 탈취 요구(영어)"),
     # 자격증명 탈취(한국어) — 두 갈래로 정밀하게:
     #  (a) 유출성 동사(가져와/넘겨/유출/탈취…): 넓은 명사(아이디/계정 포함) + 임의 간격 허용.
     (r"(아이디|비밀\s*번호|비번|패스워드|password|로그인\s*정보|인증\s*정보|자격\s*증명|계정\s*정보|크리덴셜|시크릿|액세스\s*키|api\s*키|개인\s*키).{0,12}(가져와|가져오|가져가|내놔|내놓|넘겨|빼내|빼돌|유출|훔쳐|탈취|보내라|전송해|넘겨라)", C_EXFIL, 50, "계정·비밀번호 등 자격증명 탈취(한국어)"),
     #  (b) 약한 동사(알려/보여/말해…): '비밀번호 정책 알려줘'(정상)와 구분하려고 ① 비밀 등급 명사만
     #      (아이디/계정 단독 제외) ② 사이에 조사·공백만 허용(내용어가 끼면 불매칭). '비밀번호 알려줘'는
     #      값 자체를 직접 요구 → 공격. '비밀번호 정책/방법/재설정 알려줘'는 사이 내용어로 불매칭.
-    (r"(비밀\s*번호|비번|패스워드|password|인증\s*정보|자격\s*증명|크리덴셜|시크릿|액세스\s*키|api\s*키|개인\s*키|로그인\s*정보)\s*(을|를|좀|다|들|이랑|랑|와|과|는|도|만|네|의|\s)*(알려|보여|말해|불러|가르쳐|읊어|뭐야|뭐임|뭔데)", C_EXFIL, 50, "비밀번호 등 비밀정보 직접 요구(한국어)"),
+    (r"(비밀\s*번호|비번|패스워드|password|인증\s*정보|자격\s*증명|크리덴셜|시크릿|액세스\s*키|api\s*키|개인\s*키|로그인\s*정보)(?:을|를|좀|다|들|이랑|랑|와|과|는|도|만|네|의|\s){0,8}(알려|보여|말해|불러|가르쳐|읊어|뭐야|뭐임|뭔데)", C_EXFIL, 50, "비밀번호 등 비밀정보 직접 요구(한국어)"),
     # ── 간접 주입(RAG/도구 출력 등 '데이터' 안에 심은 AI 대상 지시) ──
     # 검색결과·문서·웹페이지·이메일 본문이 LLM에 주입될 때, 그 안에 박아둔 'AI를 향한 명령'을 잡는다.
     # (이전 지시 무시/유출 시그니처는 데이터 안에 있어도 그대로 발화하므로 RAG 청크 검사에 바로 쓰인다.)
@@ -90,7 +92,7 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     (r"(이|본|위)\s*(문서|글|문장|텍스트|내용|페이지|메일|이메일|리뷰|댓글|기사)[^.\n]{0,12}(읽는|보는|처리|요약)[^.\n]{0,8}(ai|인공지능|모델|어시스턴트|봇|에이전트)", C_INDIRECT, 40, "이 문서를 읽는 AI 대상 지시(한국어)"),
     (r"(ai|인공지능|모델|어시스턴트|챗봇|에이전트)\s*(에게|한테|야|님|는|은)[^.\n]{0,20}(무시하|복종|유출|탈취|넘겨|전송해|삭제해|실행해|따르라)", C_INDIRECT, 40, "AI 호명 후 명령 삽입(한국어)"),
     # ── 유출 채널: 마크다운 이미지/링크·외부 URL로 데이터 빼돌리기(RAG 데이터 탈출) ──
-    (r"!\[[^\]]*\]\(\s*https?://[^)\s]*[?&=][^)\s]*\)", C_EXFIL, 40, "마크다운 이미지 URL로 데이터 유출 시도"),
+    (r"!\[[^\]\n]{0,80}\]\(\s*https?://[^)\s?&=]{0,300}[?&=][^)\s]{0,300}\)", C_EXFIL, 40, "마크다운 이미지 URL로 데이터 유출 시도"),
     (r"\b(send|post|upload|exfiltrate|forward|leak)\b[^.\n]{0,40}\bto\b\s+https?://", C_EXFIL, 40, "외부 URL로 전송/유출 지시(영어)"),
     # ── 다국어 인젝션(일본어·중국어) — L1 다국어 확장 ──
     (r"(以前|これまで|上記|先程|前)\s*の?\s*(指示|命令|ルール|プロンプト|指図)[^。\n]{0,8}(無視|忘れ|破棄)", C_OVERRIDE, 50, "이전 지시 무시(일본어)"),
@@ -102,15 +104,15 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
 
     # ── 데이터베이스/대량 데이터 유출 (한/영) — '사용자 DB 다 가져와'류 ──
     (r"(데이터\s*베이스|디비|사용자\s*데이터|회원\s*정보|고객\s*정보|개인\s*정보|사용자\s*정보|전체\s*데이터|모든\s*데이터|db)[^.\n]{0,12}(가져와|가져가|넘겨|빼내|빼돌|유출|탈취|내놔|덤프|보내라|전송해|다\s*줘)", C_EXFIL, 50, "사용자 데이터/DB 유출(한국어)"),
-    (r"(?i)\b(dump|exfiltrate|leak|steal|extract|download|send|give|fetch|scrape)\b[^.\n]{0,20}(the\s+|entire\s+|all\s+|whole\s+|user\s+|customer\s+|our\s+)*(database|databases|user\s+data|customer\s+data|user\s+records|user\s+table|records|pii)\b", C_EXFIL, 45, "사용자 데이터/DB 유출(영어)"),
+    (r"(?i)\b(dump|exfiltrate|leak|steal|extract|download|send|give|fetch|scrape)\b[^.\n]{0,20}(the\s+|entire\s+|all\s+|whole\s+|user\s+|customer\s+|our\s+){0,4}(database|databases|user\s+data|customer\s+data|user\s+records|user\s+table|records|pii)\b", C_EXFIL, 45, "사용자 데이터/DB 유출(영어)"),
     # 탈옥(jailbreak) 자체를 키워드로
     (r"(?i)\bjail\s*break(ing|s)?\b|탈옥", C_ROLEPLAY, 40, "탈옥(jailbreak) 명시"),
 
     # ── 다국어 인젝션(주요 언어) — 각 언어: 지시무시 / 시스템프롬프트 탈취 / 자격증명·DB 유출 ──
     # 스페인어(ES)
-    (r"(?i)(ignora|olvida|descarta|desatiende)\w*\s+(todas\s+)?(las\s+)?(instrucciones|reglas|[óo]rdenes)\s+(anteriores|previas)", C_OVERRIDE, 50, "이전 지시 무시(스페인어)"),
-    (r"(?i)(revela|muestra|imprime|repite|ens[eé][ñn]a)\w*\s+(tu\s+|el\s+|las\s+)?(prompt\s+del\s+sistema|instrucciones\s+iniciales|system\s+prompt|indicaciones\s+del\s+sistema)", C_LEAK, 45, "시스템 프롬프트 탈취(스페인어)"),
-    (r"(?i)(dame|env[ií]a\w*|revela|filtra|mu[eé]strame|comparte)\s+(la\s+|las\s+|el\s+|todas?\s+)?(contrase[ñn]as?|credenciales|clave|base\s+de\s+datos|datos\s+de\s+usuarios?)", C_EXFIL, 50, "자격증명/DB 유출(스페인어)"),
+    (r"(?i)(ignora|olvida|descarta|desatiende)\w{0,8}\s+(todas\s+)?(las\s+)?(instrucciones|reglas|[óo]rdenes)\s+(anteriores|previas)", C_OVERRIDE, 50, "이전 지시 무시(스페인어)"),
+    (r"(?i)(revela|muestra|imprime|repite|ens[eé][ñn]a)\w{0,8}\s+(tu\s+|el\s+|las\s+)?(prompt\s+del\s+sistema|instrucciones\s+iniciales|system\s+prompt|indicaciones\s+del\s+sistema)", C_LEAK, 45, "시스템 프롬프트 탈취(스페인어)"),
+    (r"(?i)(dame|env[ií]a\w{0,8}|revela|filtra|mu[eé]strame|comparte)\s+(la\s+|las\s+|el\s+|todas?\s+)?(contrase[ñn]as?|credenciales|clave|base\s+de\s+datos|datos\s+de\s+usuarios?)", C_EXFIL, 50, "자격증명/DB 유출(스페인어)"),
     # 프랑스어(FR)
     (r"(?i)(ignore[rz]?|oublie[rz]?|n[ée]glige[rz]?)\s+(toutes\s+)?(les\s+)?(instructions|r[èe]gles|consignes)\s+(pr[ée]c[ée]dentes|ant[ée]rieures)", C_OVERRIDE, 50, "이전 지시 무시(프랑스어)"),
     (r"(?i)(r[ée]v[èe]le[rz]?|montre[rz]?|affiche[rz]?)\s+(-?moi\s+)?(ton\s+|le\s+|tes\s+)?(prompt\s+syst[èe]me|instructions\s+initiales|invite\s+syst[èe]me)", C_LEAK, 45, "시스템 프롬프트 탈취(프랑스어)"),
@@ -129,7 +131,7 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     # 러시아어(RU)
     (r"(игнорируй|забудь|отмени|проигнорируй)\s+(все\s+)?(предыдущие|прошлые|вышеуказанные)\s+(инструкции|правила|указания)", C_OVERRIDE, 50, "이전 지시 무시(러시아어)"),
     (r"(покажи|раскрой|выведи|повтори)\s+(свой\s+|мне\s+)?(системный\s+промпт|системную\s+подсказку|исходные\s+инструкции)", C_LEAK, 45, "시스템 프롬프트 탈취(러시아어)"),
-    (r"(дай|отправь|покажи|слей|раскрой)\s+(мне\s+)?(все\s+)?(парол\w+|учетные\s+данные|базу\s+данных|данные\s+пользователей)", C_EXFIL, 50, "자격증명/DB 유출(러시아어)"),
+    (r"(дай|отправь|покажи|слей|раскрой)\s+(мне\s+)?(все\s+)?(парол\w{1,8}|учетные\s+данные|базу\s+данных|данные\s+пользователей)", C_EXFIL, 50, "자격증명/DB 유출(러시아어)"),
     # 아랍어(AR) — 근사치(형태 변화 많음)
     (r"(تجاهل|انسى|تخط[ىي]?)\s+(كل\s+)?(التعليمات|القواعد|الأوامر)", C_OVERRIDE, 50, "이전 지시 무시(아랍어)"),
     (r"(أعطني|أرسل|اكشف|سرب|أظهر)\s+(كل\s+)?(كلم[ةا]ت?\s+المرور|بيانات\s+الاعتماد|قاعدة\s+البيانات|بيانات\s+المستخدم)", C_EXFIL, 50, "자격증명/DB 유출(아랍어)"),
@@ -140,8 +142,16 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     (r"\b(urgent|immediately|right\s+now|asap)\b|긴급|당장|즉시", C_URGENCY, 10, "긴급성 압박"),
 ]
 
+
+
+def _tight(pat: str) -> str:
+    """공백 반복에 상한을 건다. 검사하는 글은 공백 덩어리를 2칸으로 줄여 두어 3이면 넉넉하다."""
+    return pat.replace(r"\s+", r"\s{1,3}").replace(r"\s*", r"\s{0,3}")
+
+
+# 어떤 규칙에도 무제한 반복이 없다. tests/test_redos.py가 컴파일된 정규식을 뜯어 확인한다
 _SIGNATURES = [
-    (re.compile(pat, re.IGNORECASE), cat, w, desc) for pat, cat, w, desc in _RAW_SIGNATURES
+    (re.compile(_tight(pat), re.IGNORECASE), cat, w, desc) for pat, cat, w, desc in _RAW_SIGNATURES
 ]
 
 # 제로폭/보이지 않는 문자(난독화에 자주 쓰임)
@@ -149,11 +159,17 @@ _ZERO_WIDTH = re.compile(r"[​‌‍⁠﻿­]")
 # 변이 선택자(VS)·태그 문자 — 제로폭처럼 글자 사이에 끼우는 스머글링(난독화 신호)
 _VS_TAGS = re.compile("[︀-️\U000E0000-\U000E01EF]")
 # base64로 의심되는 긴 토큰
-_B64 = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
+_B64 = re.compile(r"[A-Za-z0-9+/]{16,4096}={0,2}")
 
 # 점수 → 레벨 임계값
 FLAG_THRESHOLD = 20
 BLOCK_THRESHOLD = 50
+
+# 입력 길이 상한. 넘으면 읽지 않고 막는다
+MAX_INPUT = 20_000
+# 검사 시간 상한(CPU 초). 넘기면 끝까지 못 본 글이므로 막는다. 벽시계로 재면 PC가 바쁠 때 판정이 달라진다.
+# 규칙은 반복 횟수를 묶어 여기까지 갈 일이 드물다
+TIME_LIMIT = 1.2
 
 
 def _snippet(text: str, m: re.Match) -> str:
@@ -182,18 +198,31 @@ def _decode_b64_candidates(text: str) -> list[str]:
     return out
 
 
+def _stopped(text: str, desc: str, signal: str) -> dict:
+    """끝까지 보지 못한 글의 결과. 안전을 확인하지 못했으므로 막는다."""
+    signals = {"zero_width": False, "encoded": False, "length": len(text), "oversize": False, "timed_out": False}
+    signals[signal] = True
+    hit = {"category": C_LIMIT, "weight": 100, "desc": desc, "snippet": ""}
+    return {"score": 100, "level": "위험", "hits": [hit], "signals": signals}
+
+
 def scan(text: str) -> dict:
     """입력 텍스트를 룰 레이어로 검사한다.
+
+    길이 상한을 넘은 글과 시간 상한 안에 다 보지 못한 글은 막는다. signals의 oversize, timed_out으로 구분한다.
 
     Returns:
         {
           "score": int(0~100),
           "level": "안전" | "의심" | "위험",
           "hits": [{"category","weight","desc","snippet"} ...],
-          "signals": {"zero_width": bool, "encoded": bool, "length": int},
+          "signals": {"zero_width": bool, "encoded": bool, "length": int, "oversize": bool, "timed_out": bool},
         }
     """
     text = text or ""
+    if len(text) > MAX_INPUT:
+        return _stopped(text, f"입력이 {MAX_INPUT}자를 넘는다", "oversize")
+    deadline = time.thread_time() + TIME_LIMIT
     hits: list[dict] = []
     seen_cat_desc = set()
 
@@ -204,11 +233,14 @@ def scan(text: str) -> dict:
         seen_cat_desc.add(key)
         hits.append({"category": category, "weight": weight, "desc": desc, "snippet": snippet})
 
-    # 1) 평문 시그니처
+    # 1) 평문 시그니처. 공백 덩어리를 먼저 줄인다
+    squeezed = normalize.squeeze(text)
     for rx, cat, w, desc in _SIGNATURES:
-        m = rx.search(text)
+        if time.thread_time() > deadline:
+            return _stopped(text, "검사가 시간 안에 끝나지 않았다", "timed_out")
+        m = rx.search(squeezed)
         if m:
-            add(cat, w, desc, _snippet(text, m))
+            add(cat, w, desc, _snippet(squeezed, m))
 
     # 2) 역난독화: 정규화·리트스피크·공백복원·인코딩 디코드 뷰에서 시그니처 재검사
     #    (평문에서 이미 잡힌 시그니처는 건너뛰어 이중 가산을 막는다)
@@ -222,6 +254,8 @@ def scan(text: str) -> dict:
         if (cat, desc) in raw_keys or (cat, desc) in deobf_added:
             continue
         for label, view in views:
+            if time.thread_time() > deadline:
+                return _stopped(text, "검사가 시간 안에 끝나지 않았다", "timed_out")
             if rx.search(view):
                 encoded = True
                 deobf_added.add((cat, desc))
@@ -243,7 +277,7 @@ def scan(text: str) -> dict:
         "score": score,
         "level": level,
         "hits": hits,
-        "signals": {"zero_width": zero_width, "encoded": encoded, "length": len(text)},
+        "signals": {"zero_width": zero_width, "encoded": encoded, "length": len(text), "oversize": False, "timed_out": False},
     }
 
 
@@ -273,18 +307,24 @@ def detect_spans(text: str) -> list[dict]:
     """탐지된 악성 '구간'을 원문 문자 오프셋으로 돌려준다(인라인 하이라이트용).
 
     겹치는 구간은 병합하고, 그 구간 색은 가장 높은 가중치 시그니처의 카테고리를 따른다.
+    글이 길면 앞부분만 보고, 시간 상한에 닿으면 찾은 데까지 돌려준다. 하이라이트는 판정에 쓰지 않는다.
     Returns: [{"start": int, "end": int, "category": str, "weight": int} ...] (start 오름차순)
     """
-    text = text or ""
+    text = (text or "")[:MAX_INPUT]
     raw: list[tuple[int, int, str, int]] = []
+    deadline = time.thread_time() + TIME_LIMIT
 
     for rx, cat, w, _desc in _SIGNATURES:
+        if time.thread_time() > deadline:
+            break
         for m in rx.finditer(text):
             if m.end() > m.start():
                 raw.append((m.start(), m.end(), cat, w))
 
     # base64로 숨긴 공격: 원문에서 그 토큰 위치를 하이라이트
     for m in _B64.finditer(text):
+        if time.thread_time() > deadline:
+            break
         dec = _try_decode(m.group(0))
         if dec and _decoded_is_attack(dec):
             raw.append((m.start(), m.end(), C_ENCODE, 60))
