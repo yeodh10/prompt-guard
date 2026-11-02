@@ -28,27 +28,45 @@ C_EXFIL = "권한 우회/유출 유도"
 C_ENCODE = "인코딩/난독 우회"
 C_URGENCY = "긴급·압박(사회공학)"
 C_INDIRECT = "간접 주입(RAG/문서 내 지시)"
+C_CREDENTIAL = "자격증명 탈취 명령"
 C_LIMIT = "검사 한도 초과"
+
+# 앞선 지시를 가리키는 말. '범위 내용', '단위 내용'의 '위'는 가리키는 말이 아니다
+_PREV = r"(?:이\s*전|앞서|앞선?|(?<![범주단지품순상하부행])위|상기|종전|기존)"
+# 모델이 받은 지시를 뜻하는 말
+_INSTR = r"(?:지시|지침|명령|규칙|프롬프트|안내|내용)"
+_WIPE = r"(?:지우|지워|삭제|제거|없애|날려|초기화|리셋|클리어)"
+_DET = r"(?:all|any|every|of|the|these|those|your|my)"
+_ORDERS = r"(?:instructions?|rules?|guidelines?|prompts?)"
+_DROP = r"(?:the|all|any|of|your|everything|that\s+was|you\s+were|stated|said|written|told)"
 
 # (정규식, 카테고리, 가중치, 설명). 대소문자 무시. 한·영 동시 대응.
 _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     # 지시 무시 — 가장 전형적인 인젝션
-    (r"ignore\s+(all\s+|the\s+)?(previous|above|prior|earlier)\s+(instructions?|prompts?|messages?)", C_OVERRIDE, 50, "이전 지시 무시 요구"),
-    (r"disregard\s+(the\s+|all\s+|everything\s+)?(that\s+was\s+|stated\s+|said\s+|written\s+)?(above|previous|prior|earlier|before|instructions?|rules?)", C_OVERRIDE, 45, "이전 지시 무효화"),
-    (r"forget\s+(everything|all\s+|the\s+|your\s+)?(instructions?|rules?|guidelines?|directives?|prompts?)", C_OVERRIDE, 40, "지시 망각 요구"),
+    (rf"ignore\s+(?:{_DET}\s+){{0,5}}(?:previous|above|prior|earlier)\s+(?:{_DET}\s+){{0,2}}(?:instructions?|prompts?|messages?|rules?|guidelines?)"
+     rf"|ignore\s+(?:{_DET}\s+){{0,4}}(?:instructions?|prompts?|rules?)\s+(?:above|given|before|so\s+far)"
+     rf"|ignore\s+(?:all|any|every|your)\s+(?:{_DET}\s+){{0,3}}(?:instructions?|rules?)", C_OVERRIDE, 50, "이전 지시 무시 요구"),
+    (rf"disregard\s+(?:{_DROP}\s+){{0,4}}(?:(?:above|previous|prior|earlier)\s+(?:{_DROP}\s+){{0,2}})?{_ORDERS}", C_OVERRIDE, 45, "이전 지시 무효화"),
+    # 뒤에 지시를 뜻하는 말이 없으면 메일의 '앞 메일은 무시해 주세요'와 같은 모양이다. 위 규칙과 겹치지 않는다
+    (rf"disregard\s+(?:{_DROP}\s+){{0,4}}(?:above|previous|prior|earlier|before)(?!\s+(?:{_DROP}\s+){{0,2}}{_ORDERS})", C_OVERRIDE, 45, "앞선 내용 무효화"),
+    (r"forget\s+(?:(?:everything|all|any|of|the|your|my|previous|prior|earlier|above|roles?|and)\s+){0,5}(?:instructions?|rules?|guidelines?|directives?|prompts?)"
+     r"|forget\s+(?:everything|all)\s+(?:(?:of|the|your)\s+){0,2}(?:above|previous|prior|earlier)", C_OVERRIDE, 40, "지시 망각 요구"),
     (r"(pay\s+no\s+attention\s+to|do\s+not\s+follow|stop\s+following)\s+(the\s+)?(above|previous|earlier|prior|instructions?|rules?)", C_OVERRIDE, 45, "이전 지시 따르지 말 것 요구"),
-    (r"(이\s*전|앞|위)(의|에)?\s*(지시|명령|규칙|프롬프트|내용).{0,8}(무시|잊|무효)", C_OVERRIDE, 50, "이전 지시 무시(한국어)"),
-    # 삭제형 덮어쓰기: '(이전/위) 지시·프롬프트를 지우고…' — 무시 대신 '삭제' 동사. 접두(이전/위/앞)는
-    # 선택적(없어도 매칭) — '프롬프트 다 지우고'처럼 접두 없는 변형도 잡는다. 명사는 지시/명령/규칙/
-    # 프롬프트로 한정(대화/기록 제외 — '이전 대화 기록 삭제'는 정상 기능 문의라 오탐 위험).
-    (r"(지시|명령|규칙|시스템\s*프롬프트|프롬프트)\s*(을|를|들|다|싹|전부|모두)?\s*.{0,6}(지우|지워|삭제|제거|없애|날려|초기화|리셋|클리어)", C_OVERRIDE, 45, "지시/프롬프트 삭제 요구(한국어)"),
+    (rf"{_PREV}(?:의|에)?\s*(?:모든\s*|전체\s*|일체\s*)?{_INSTR}[^.。!?\n]{{0,24}}(?:무시|잊(?!지\s*(?:마|말|않)))", C_OVERRIDE, 50, "이전 지시 무시(한국어)"),
+    (rf"무시(?:하라|해라|하시오|하십시오|하세요|해\s*주세요|해\s*주십시오)[\s,]{{0,4}}{_PREV}(?:의|에)?\s*(?:모든\s*)?{_INSTR}", C_OVERRIDE, 50, "이전 지시 무시, 어순 뒤집기(한국어)"),
+    (rf"{_PREV}(?:의|에)?\s*(?:모든\s*|전체\s*)?{_INSTR}[^.。!?\n]{{0,12}}무효", C_OVERRIDE, 50, "이전 지시 무효화 의심(한국어)"),
+    # 삭제형 덮어쓰기: 무시 대신 '삭제' 동사. 앞말(이전/위/앞)이 없는 '프롬프트 다 지우고'도 잡는다.
+    # 대화, 기록은 제외('이전 대화 기록 삭제'는 정상 기능 문의).
+    (rf"프롬프트\s*(?:을|를|들|다|싹|전부|모두)?\s*.{{0,6}}{_WIPE}", C_OVERRIDE, 45, "프롬프트 삭제 요구(한국어)"),
+    (rf"(?:지시|명령|규칙)\s*(?:을|를|들|다|싹|전부|모두)?\s*.{{0,6}}{_WIPE}", C_OVERRIDE, 45, "지시 삭제 요구(한국어)"),
     (r"무시(하고|해)\s*(새로운|아래|다음)", C_OVERRIDE, 35, "무시하고 새 지시 따르기"),
     (r"override\s+(your|the|all|system)\s+(instructions?|rules?|settings?|prompt)", C_OVERRIDE, 45, "설정 덮어쓰기"),
     # 시스템 프롬프트 탈취
     (r"(reveal|show|print|repeat|output|display)\s+(me\s+)?(your\s+)?(system\s+prompt|initial\s+(instructions?|prompt)|the\s+(words?|text)\s+above)", C_LEAK, 45, "시스템 프롬프트 출력 요구"),
     (r"what\s+(are|were)\s+your\s+(original\s+)?(instructions?|system\s+prompt|guidelines?)", C_LEAK, 35, "초기 지시 캐묻기"),
-    (r"(시스템\s*프롬프트|초기\s*(지시|설정|프롬프트)).{0,25}(출력|보여|알려|그대로|반복|복사)", C_LEAK, 45, "시스템 프롬프트 탈취(한국어)"),
-    (r"위(의)?\s*(모든\s*|전체\s*)?(내용|지시|문장|것|메시지|텍스트).{0,25}(그대로|출력|보여|반복|복사)", C_LEAK, 40, "상단 내용 그대로 출력 요구(한국어)"),
+    (r"(시스템\s*프롬프트|초기\s*(지시|프롬프트)).{0,25}(출력|보여|알려|그대로|반복|복사)", C_LEAK, 45, "시스템 프롬프트 탈취(한국어)"),
+    (r"초기\s*설정.{0,25}(출력|보여|알려|그대로|반복|복사)", C_LEAK, 45, "초기 설정 탈취(한국어)"),
+    (r"(?<![범주단지품순상하부행])위(의)?\s*(모든\s*|전체\s*)?(내용|지시|문장|것|메시지|텍스트).{0,25}(그대로|출력|보여|반복|복사)", C_LEAK, 40, "상단 내용 그대로 출력 요구(한국어)"),
     (r"한\s*글자도\s*(빼지|빠짐없이|틀리지)", C_LEAK, 25, "원문 그대로 추출 요구"),
     (r"repeat\s+(the\s+)?(words?|everything)\s+above\s+(verbatim|exactly)?", C_LEAK, 40, "상단 내용 그대로 반복"),
     # 역할극 탈옥
@@ -64,10 +82,11 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     (r"(거부|거절|경고)\s*(하지\s*마|없이|금지)", C_REFUSAL, 30, "거부 억제(한국어)"),
     (r"no\s+matter\s+what|at\s+all\s+costs|무조건|반드시\s*해", C_REFUSAL, 15, "무조건 수행 압박"),
     # 구분자/역할 마크업 위조
-    (r"</?(system|assistant|user|im_start|im_end)\s*\|?>?", C_DELIM, 40, "역할 태그 위조"),
-    (r"<\|(im_start|im_end|system|endoftext)\|>", C_DELIM, 45, "특수 토큰 위조"),
-    (r"(?m)^[ \t]{0,3}(?:###[ \t]{0,3}|\[[ \t]{0,3})?(?:system|assistant)\s*[:\]]", C_DELIM, 30, "가짜 시스템/어시스턴트 턴"),
-    (r"\[/?INST\]|\[/?SYS\]", C_DELIM, 40, "명령 구분자 위조"),
+    (r"<\s*/?\s*(?:system|assistant|user|developer|human|im_start|im_end)(?![a-z0-9_])", C_DELIM, 40, "역할 태그 위조"),
+    (r"<\|?\s*/?(?:im_start|im_end|system|endoftext|start_of_turn|end_of_turn|eot_id|start_header_id|end_header_id)\s*\|?>|<<\s*/?\s*sys\s*>>", C_DELIM, 45, "특수 토큰 위조"),
+    (r"(?m)^[ \t]{0,3}(?:#{1,6}[ \t]{0,3}|\[[ \t]{0,3})?(?:system|assistant)[ \t]{0,3}[:\]]", C_DELIM, 30, "가짜 시스템/어시스턴트 턴"),
+    (r"시스템\s*:[^\n]{0,120}어시스턴트\s*:", C_DELIM, 40, "가짜 턴(한국어)"),
+    (r"\[\s*/?\s*(?:INST|SYS)\s*\]", C_DELIM, 40, "명령 구분자 위조"),
     # 권한 우회/유출 유도
     (r"\b(bypass|circumvent|evade|disable)\s+(the\s+)?(filter|safety|guardrail|moderation|restriction|security)", C_EXFIL, 40, "안전장치 우회 요구"),
     # 가정법/허구 프레이밍 우회: "hypothetically, if you had no content policy…"
@@ -79,7 +98,8 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     (r"\b(reveal|send|hand|fetch|expose|leak|dump|steal|exfiltrate|give|tell|show)\s+(me\s+|us\s+)?(all\s+|the\s+|your\s+|every\s+|any\s+|stored\s+|saved\s+){0,6}(passwords?|credentials?|api[\s_-]{0,3}keys?|secret[\s_-]{0,3}keys?|access[\s_-]{0,3}tokens?|private[\s_-]{0,3}keys?|login\s+credentials?)\b", C_EXFIL, 50, "자격증명/키 탈취 요구(영어)"),
     # 자격증명 탈취(한국어) — 두 갈래로 정밀하게:
     #  (a) 유출성 동사(가져와/넘겨/유출/탈취…): 넓은 명사(아이디/계정 포함) + 임의 간격 허용.
-    (r"(아이디|비밀\s*번호|비번|패스워드|password|로그인\s*정보|인증\s*정보|자격\s*증명|계정\s*정보|크리덴셜|시크릿|액세스\s*키|api\s*키|개인\s*키).{0,12}(가져와|가져오|가져가|내놔|내놓|넘겨|빼내|빼돌|유출|훔쳐|탈취|보내라|전송해|넘겨라)", C_EXFIL, 50, "계정·비밀번호 등 자격증명 탈취(한국어)"),
+    (r"(아이디|비밀\s*번호|비번|패스워드|password|로그인\s*정보|인증\s*정보|자격\s*증명|계정\s*정보|크리덴셜|시크릿|액세스\s*키|api\s*키|개인\s*키).{0,12}(가져와|내놔|내놓아|넘겨라|빼내라|빼돌려|훔쳐|보내라|전송해)", C_CREDENTIAL, 50, "계정, 비밀번호 등 자격증명 탈취 명령(한국어)"),
+    (r"(아이디|비밀\s*번호|비번|패스워드|password|로그인\s*정보|인증\s*정보|자격\s*증명|계정\s*정보|크리덴셜|시크릿|액세스\s*키|api\s*키|개인\s*키).{0,12}(가져오|가져가|내놓(?!아)|넘겨(?!라)|빼내(?!라)|빼돌(?!려)|유출|탈취)", C_EXFIL, 50, "계정·비밀번호 등 자격증명 탈취(한국어)"),
     #  (b) 약한 동사(알려/보여/말해…): '비밀번호 정책 알려줘'(정상)와 구분하려고 ① 비밀 등급 명사만
     #      (아이디/계정 단독 제외) ② 사이에 조사·공백만 허용(내용어가 끼면 불매칭). '비밀번호 알려줘'는
     #      값 자체를 직접 요구 → 공격. '비밀번호 정책/방법/재설정 알려줘'는 사이 내용어로 불매칭.
@@ -90,8 +110,8 @@ _RAW_SIGNATURES: list[tuple[str, str, int, str]] = [
     (r"(if|when)\s+you('?re|\s+are)\s+(an?\s+)?(a\.?i\.?|ai|llm|assistant|language\s+model|chatbot)\b", C_INDIRECT, 35, "데이터 속 AI 조건부 호출(영어)"),
     (r"\b(ai|assistant|llm|chatbot)\s+(that\s+is\s+|who\s+is\s+)?reading\s+this\b", C_INDIRECT, 40, "이 글을 읽는 AI 호출(영어)"),
     (r"as\s+an?\s+(ai|language\s+model|assistant)\b[^.\n]{0,30}(you\s+(must|should|will|need|have\s+to)|ignore|reveal|send|delete|do\s+the\s+following)", C_INDIRECT, 40, "AI 사칭 지시 삽입(영어)"),
-    (r"(이|본|위)\s*(문서|글|문장|텍스트|내용|페이지|메일|이메일|리뷰|댓글|기사)[^.\n]{0,12}(읽는|보는|처리|요약)[^.\n]{0,8}(ai|인공지능|모델|어시스턴트|봇|에이전트)", C_INDIRECT, 40, "이 문서를 읽는 AI 대상 지시(한국어)"),
-    (r"(ai|인공지능|모델|어시스턴트|챗봇|에이전트)\s*(에게|한테|야|님|는|은)[^.\n]{0,20}(무시하|복종|유출|탈취|넘겨|전송해|삭제해|실행해|따르라)", C_INDIRECT, 40, "AI 호명 후 명령 삽입(한국어)"),
+    (r"(이|본|위)\s*(문서|글|문장|텍스트|내용|페이지|메일|이메일|리뷰|댓글|기사)[^.\n]{0,12}(읽는|보는|처리|요약)[^.\n]{0,8}((?<![a-z])ai(?![a-z])|인공지능|모델|어시스턴트|봇|에이전트)", C_INDIRECT, 40, "이 문서를 읽는 AI 대상 지시(한국어)"),
+    (r"((?<![a-z])ai|인공지능|모델|어시스턴트|챗봇|에이전트)\s*(에게|한테|야|님|는|은)[^.\n]{0,20}(무시하|복종|유출|탈취|넘겨|전송해|삭제해|실행해|따르라)", C_INDIRECT, 40, "AI 호명 후 명령 삽입(한국어)"),
     # ── 유출 채널: 마크다운 이미지/링크·외부 URL로 데이터 빼돌리기(RAG 데이터 탈출) ──
     (r"!\[[^\]\n]{0,80}\]\(\s*https?://[^)\s?&=]{0,300}[?&=][^)\s]{0,300}\)", C_EXFIL, 40, "마크다운 이미지 URL로 데이터 유출 시도"),
     (r"\b(send|post|upload|exfiltrate|forward|leak)\b[^.\n]{0,40}\bto\b\s+https?://", C_EXFIL, 40, "외부 URL로 전송/유출 지시(영어)"),
@@ -165,6 +185,39 @@ _B64 = re.compile(r"[A-Za-z0-9+/]{16,4096}={0,2}")
 FLAG_THRESHOLD = 20
 BLOCK_THRESHOLD = 50
 
+# 규칙 등급. 점수와 따로 '얼마나 확실한 신호인가'를 적는다
+GRADE_SINGLE = "단독 차단"  # 하나만 맞아도 어느 경로에서든 막는다
+GRADE_CERTAIN = "확실"  # 믿을 수 없는 문서에서 하나만 맞아도 막는다
+GRADE_BROAD = "넓음"  # 정상 글에도 나올 수 있다. 문서에서는 몇 개가 맞아도 검토까지다
+
+# 역할 표시 위조. 정상 대화에 쓸 까닭이 없는데 가중치가 50에 못 미쳐 검토로 빠지곤 했다
+SINGLE_RULES = {"특수 토큰 위조", "명령 구분자 위조"}
+CERTAIN_CATEGORIES = {C_OVERRIDE, C_LEAK, C_ROLEPLAY, C_DELIM, C_INDIRECT, C_CREDENTIAL, C_LIMIT}
+# 위 종류 안에서도 정상 글에 나올 수 있는 규칙
+BROAD_RULES = {
+    "앞선 내용 무효화",  # please disregard the previous email
+    "이전 지시 무효화 의심(한국어)",  # 위 내용은 무효로 합니다
+    "지시 삭제 요구(한국어)",  # 기존 규칙을 삭제하고 다음과 같이 한다
+    "무시하고 새 지시 따르기",  # 경미한 차이는 무시하고 다음과 같이 산정한다
+    "설정 덮어쓰기",  # override the settings
+    "초기 지시 캐묻기",  # what are your guidelines
+    "초기 설정 탈취(한국어)",  # 초기 설정 화면을 보여 준다
+    "상단 내용 그대로 출력 요구(한국어)",  # 위 내용을 신청서에 그대로 옮겨 적어 주시기 바랍니다
+    "원문 그대로 추출 요구",
+    "DAN 탈옥 페르소나",  # dan은 사람 이름이기도 하다
+    "특권 모드 위장",  # developer mode 설명서
+    "역할극 유도",  # imagine that
+    "탈옥(jailbreak) 명시",  # 탈옥 사건 기사
+    "가짜 시스템/어시스턴트 턴",  # System: Windows 11
+}
+
+
+def grade(category: str, rule: str) -> str:
+    if rule in SINGLE_RULES:
+        return GRADE_SINGLE
+    return GRADE_CERTAIN if category in CERTAIN_CATEGORIES and rule not in BROAD_RULES else GRADE_BROAD
+
+
 # 입력 길이 상한. 넘으면 읽지 않고 막는다
 MAX_INPUT = 20_000
 # 검사 시간 상한(CPU 초). 넘기면 끝까지 못 본 글이므로 막는다. 벽시계로 재면 PC가 바쁠 때 판정이 달라진다.
@@ -202,7 +255,7 @@ def _stopped(text: str, desc: str, signal: str) -> dict:
     """끝까지 보지 못한 글의 결과. 안전을 확인하지 못했으므로 막는다."""
     signals = {"zero_width": False, "encoded": False, "length": len(text), "oversize": False, "timed_out": False}
     signals[signal] = True
-    hit = {"category": C_LIMIT, "weight": 100, "rule": desc, "desc": desc, "snippet": ""}
+    hit = {"category": C_LIMIT, "weight": 100, "rule": desc, "desc": desc, "snippet": "", "grade": GRADE_SINGLE}
     return {"score": 100, "level": "위험", "hits": [hit], "signals": signals}
 
 
@@ -217,7 +270,7 @@ def scan(text: str) -> dict:
         {
           "score": int(0~100),
           "level": "안전" | "의심" | "위험",
-          "hits": [{"category","weight","desc","rule","snippet"} ...],
+          "hits": [{"category","weight","desc","rule","grade","snippet"} ...],
           "signals": {"zero_width": bool, "encoded": bool, "length": int, "oversize": bool, "timed_out": bool},
         }
     """
@@ -240,7 +293,7 @@ def scan(text: str) -> dict:
             if m:
                 m = rx.search(view) or m
                 encoded = encoded or n > 0
-                hits.append({"category": cat, "weight": w, "rule": desc, "snippet": _snippet(m.string, m),
+                hits.append({"category": cat, "weight": w, "rule": desc, "snippet": _snippet(m.string, m), "grade": grade(cat, desc),
                              "desc": f"{desc} (난독 우회: {label})" if n else desc})
                 break
 
@@ -248,9 +301,12 @@ def scan(text: str) -> dict:
     hidden = bool(normalize.hidden_chars(text))
     if hidden:
         hits.append({"category": C_ENCODE, "weight": 25, "rule": "숨은 문자", "desc": "보이지 않는 제로폭 문자(난독화)",
-                     "snippet": "(zero-width chars)"})
+                     "snippet": "(zero-width chars)", "grade": GRADE_BROAD})
 
     score = min(100, sum(h["weight"] for h in hits))
+    # 단독 차단 규칙은 가중치 합과 상관없이 막는다
+    if any(h["grade"] == GRADE_SINGLE for h in hits):
+        score = max(score, BLOCK_THRESHOLD)
     level = "위험" if score >= BLOCK_THRESHOLD else "의심" if score >= FLAG_THRESHOLD else "안전"
 
     # 위험도순 정렬
