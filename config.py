@@ -37,9 +37,9 @@ def _get(name: str, default: str = "") -> str:
 
 
 ANTHROPIC_API_KEY = _get("ANTHROPIC_API_KEY", "")
-# 분류기는 빠르고 저렴한 모델이 적합하다. 기본은 형제 프로젝트와 맞춰 두되 .env로 교체 가능.
-# (예: ANTHROPIC_MODEL=claude-haiku-4-5 로 더 빠르고 싸게)
-ANTHROPIC_MODEL = _get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+# 분류기는 빠르고 저렴한 모델이 적합하다. .env의 ANTHROPIC_MODEL로 바꿀 수 있다.
+DEFAULT_MODEL = "claude-haiku-5-5"
+ANTHROPIC_MODEL = _get("ANTHROPIC_MODEL", DEFAULT_MODEL)
 
 ANTHROPIC_MAX_RETRIES = int(os.getenv("ANTHROPIC_MAX_RETRIES", "3"))
 ANTHROPIC_TIMEOUT = float(os.getenv("ANTHROPIC_TIMEOUT", "30"))
@@ -76,4 +76,4 @@ def reload_runtime_keys() -> None:
     """배포(Streamlit Secrets) 환경에서 런타임에 키를 다시 읽어 전역을 최신화."""
     global ANTHROPIC_API_KEY, ANTHROPIC_MODEL
     ANTHROPIC_API_KEY = _get("ANTHROPIC_API_KEY", "")
-    ANTHROPIC_MODEL = _get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    ANTHROPIC_MODEL = _get("ANTHROPIC_MODEL", DEFAULT_MODEL)

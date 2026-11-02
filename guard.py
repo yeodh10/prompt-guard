@@ -14,6 +14,11 @@ import detector
 import egress
 import rules
 
+# LLM 층이 '공격'이라 할 때 얼마나 확신해야 막고(차단), 사람에게 넘기는가(검토).
+# 문서는 정상 글에도 지시와 명령이 많아 더 높게 둔다.
+LLM_BLOCK = {False: 0.75, True: 0.9}
+LLM_FLAG = {False: 0.40, True: 0.5}
+
 # 판정 → (이모지, 색). app.py 다크 테마와 맞춤.
 DECISION_META = {
     "차단": ("🚫", "#FF5C7A"),
@@ -29,6 +34,8 @@ def evaluate(text: str, use_llm: bool = True, fail_closed: bool = False, documen
     document=True는 사람이 친 말이 아니라 RAG 청크, 웹페이지, 메일, 공문서처럼 믿을 수 없는 글을 볼 때 쓴다.
         글을 읽는 쪽에게 하는 지시를 더 보고, 점수 합이 아니라 규칙 등급으로 판단한다(rules.scan 참고).
         길이 상한도 5만 자로 넓다. 규칙이 막은 글은 LLM에 묻지 않는다.
+        LLM 층은 문서용 기준(detector.classify_document)으로 묻고, 90% 넘게 확신할 때만 막는다.
+        '주제 밖' 판정은 어색한 글일 뿐 조종하려는 뜻이 아닐 수 있어 확신이 높아도 검토까지다.
     schema_fields: 문서 모드에서 호출하는 쪽 출력 스키마의 필드 이름들. 문서가 출력 형식을 흉내 내면 잡는다.
 
     fail_closed=False(기본): fail-open — 아무 신호도 없으면 '허용'.
@@ -57,7 +64,7 @@ def evaluate(text: str, use_llm: bool = True, fail_closed: bool = False, documen
     settled = unread or (document and rule["score"] >= rules.BLOCK_THRESHOLD)
     llm = None
     if use_llm and not settled and config.has_anthropic_key():
-        llm = detector.classify(text)
+        llm = detector.classify_document(text) if document else detector.classify(text)
 
     llm_ok = bool(llm and llm.get("ok"))
     llm_inj = bool(llm_ok and llm.get("is_injection"))
@@ -70,10 +77,11 @@ def evaluate(text: str, use_llm: bool = True, fail_closed: bool = False, documen
     if rule_fired and llm_inj:
         risk = min(100, risk + 10)
 
-    block = rule["score"] >= rules.BLOCK_THRESHOLD or (llm_inj and llm_conf >= 0.75)
+    off_topic = llm_inj and llm.get("category") == detector.OFF_TOPIC
+    block = rule["score"] >= rules.BLOCK_THRESHOLD or (llm_inj and llm_conf >= LLM_BLOCK[document] and not off_topic)
     flag = (not block) and (
         rule_fired
-        or (llm_inj and llm_conf >= 0.40)
+        or (llm_inj and llm_conf >= LLM_FLAG[document])
         or rule["signals"]["zero_width"]
         or rule["signals"]["encoded"]
     )
@@ -88,7 +96,8 @@ def evaluate(text: str, use_llm: bool = True, fail_closed: bool = False, documen
         reasons.append(f"[룰] {h['category']} — {h['desc']}")
     if llm_inj:
         reasons.append(
-            f"[LLM] {llm.get('category', '인젝션 의심')} (확신 {llm_conf:.0%}) — {llm.get('reason', '')}"
+            f"[LLM] {llm.get('category', '인젝션 의심')} (확신 {llm_conf:.0%}) — {str(llm.get('reason', ''))[:80]}"
+            + (f" / 문장: {llm['sentence'][:80]}" if llm.get("sentence") else "")
         )
     elif llm and not llm_ok:
         reasons.append(f"[LLM] 분류 불가: {llm.get('error', '')}")
