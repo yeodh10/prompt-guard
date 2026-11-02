@@ -13,13 +13,20 @@
   python evaluate.py            # 룰 단독 측정(키 불필요)
   python evaluate.py --llm      # 룰+LLM 측정(키 필요)
   python evaluate.py --json     # 지표를 JSON으로도 출력
+  python evaluate.py --blind             # 두 묶음을 문서 모드로 측정(키 불필요)
+  python evaluate.py --blind --llm --max-calls 400   # 규칙+LLM 측정(키 필요, 호출 수 상한)
+
+--blind는 eval_data/의 시험 문장을 지어낸 공고 가운데에 끼워 guard.evaluate(document=True)로 잰다.
+이 묶음은 공개되어 있어 다시 재면 블라인드가 아니다. 측정 방법과 뜻은 docs/eval-results.md에 있다.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from collections import defaultdict
+import threading
+from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 import eval_dataset
 
@@ -109,13 +116,83 @@ def format_report(rows: list[dict], layer_label: str, mode: str = "lenient") -> 
     return "\n".join(L), m
 
 
+def _blind_jobs(alone: bool = False) -> list[tuple[str, str, str, str]]:
+    """(묶음, 공격/정상, 시험 문장, 검사할 글) 목록. alone은 2차 정상 문장을 짧은 글에도 넣어 본다.
+
+    정상 문장을 상관없는 공고에 끼우면 '주제 밖'이 나오는 것이 당연하다. 그래서 짧은 글로도 잰다.
+    """
+    jobs = []
+    bodies = eval_dataset.carriers()
+    for name, filename, attack in eval_dataset.BLIND_BATCHES:
+        for i, line in enumerate(eval_dataset.blind_lines(filename)):
+            jobs.append((name, "attack" if attack else "benign", line, eval_dataset.inject(line, i, bodies)))
+            if alone and name == "2차 정상":
+                jobs.append((f"{name}(짧은 글)", "benign", line, f"한빛구 공고\n\n{line}"))
+    for i, body in enumerate(bodies):
+        jobs.append(("지어낸 공고", "benign", f"공고 {i + 1}", body))
+    return jobs
+
+
+def run_blind(use_llm: bool = False, max_calls: int = 400, workers: int = 5, evaluate_fn=None, alone: bool = False) -> list[dict]:
+    """묶음을 문서 모드로 잰다. LLM 호출은 max_calls에서 멈추고, 남은 글은 규칙만으로 본다."""
+    if evaluate_fn is None:
+        import guard
+        evaluate_fn = guard.evaluate
+    lock = threading.Lock()
+    spent = [0]
+
+    def one(job):
+        batch, label, line, text = job
+        rule = evaluate_fn(text, use_llm=False, document=True)
+        final, llm_state = rule, "안 씀"
+        if use_llm and rule["decision"] != "차단":
+            with lock:
+                allowed = spent[0] < max_calls
+                spent[0] += allowed
+            if allowed:
+                final = evaluate_fn(text, use_llm=True, document=True)
+                llm_state = "답함" if (final.get("llm") or {}).get("ok") else "답 못 받음"
+            else:
+                llm_state = "상한 초과"
+        return {"batch": batch, "label": label, "line": line, "rule": rule["decision"], "final": final["decision"],
+                "llm": llm_state, "reasons": final["reasons"][:2]}
+
+    with ThreadPoolExecutor(workers if use_llm else 1) as ex:
+        return list(ex.map(one, _blind_jobs(alone)))
+
+
+def format_blind(rows: list[dict]) -> str:
+    L = ["\n=== 묶음 측정 · 문서 모드 ===", "묶음 | 건수 | 규칙만 차단/검토/허용 | 규칙+LLM 차단/검토/허용 | LLM 호출 | 답 못 받음"]
+    for batch in dict.fromkeys(r["batch"] for r in rows):
+        rs = [r for r in rows if r["batch"] == batch]
+        a, b = Counter(r["rule"] for r in rs), Counter(r["final"] for r in rs)
+        calls = sum(r["llm"] in ("답함", "답 못 받음") for r in rs)
+        fails = sum(r["llm"] == "답 못 받음" for r in rs)
+        L.append(f"{batch} | {len(rs)} | {a['차단']}/{a['검토']}/{a['허용']} | {b['차단']}/{b['검토']}/{b['허용']} | {calls} | {fails}")
+    return "\n".join(L)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="prompt-guard 탐지 성능 평가")
     ap.add_argument("--llm", action="store_true", help="LLM 레이어 포함(키 필요)")
     ap.add_argument("--json", action="store_true", help="지표를 JSON으로도 출력")
+    ap.add_argument("--blind", action="store_true", help="eval_data 묶음을 문서 모드로 측정")
+    ap.add_argument("--alone", action="store_true", help="--blind에서 2차 정상 문장을 짧은 글로도 측정")
+    ap.add_argument("--max-calls", type=int, default=400, help="--blind --llm의 LLM 호출 상한")
     args = ap.parse_args()
 
     import config
+
+    if args.blind:
+        use_llm = args.llm and config.has_anthropic_key()
+        if args.llm and not use_llm:
+            print("⚠️  ANTHROPIC_API_KEY가 없어 LLM 레이어를 건너뜁니다(룰 단독만 측정).")
+        rows = run_blind(use_llm=use_llm, max_calls=args.max_calls, alone=args.alone)
+        print(format_blind(rows))
+        if args.json:
+            print("\n" + json.dumps(rows, ensure_ascii=False, indent=1))
+        return
+
     dataset = eval_dataset.all_labeled()
 
     use_llm = args.llm
