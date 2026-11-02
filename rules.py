@@ -16,6 +16,7 @@ import re
 import time
 import unicodedata
 
+import docsignals
 import normalize
 
 # ── 시그니처 카테고리(한글 라벨) ───────────────────────────────
@@ -197,7 +198,6 @@ CERTAIN_CATEGORIES = {C_OVERRIDE, C_LEAK, C_ROLEPLAY, C_DELIM, C_INDIRECT, C_CRE
 BROAD_RULES = {
     "앞선 내용 무효화",  # please disregard the previous email
     "이전 지시 무효화 의심(한국어)",  # 위 내용은 무효로 합니다
-    "지시 삭제 요구(한국어)",  # 기존 규칙을 삭제하고 다음과 같이 한다
     "무시하고 새 지시 따르기",  # 경미한 차이는 무시하고 다음과 같이 산정한다
     "설정 덮어쓰기",  # override the settings
     "초기 지시 캐묻기",  # what are your guidelines
@@ -212,7 +212,13 @@ BROAD_RULES = {
 }
 
 
+# 문서 모드에서 쓰지 않는 규칙. '시행규칙 제3조를 삭제한다'는 정상 글이다. 앞말이 있는 경우는 docsignals가 본다
+QUESTION_ONLY = {"지시 삭제 요구(한국어)"}
+
+
 def grade(category: str, rule: str) -> str:
+    if category == docsignals.C_DOCUMENT:
+        raise ValueError("문서 신호의 등급은 가중치로 정한다")
     if rule in SINGLE_RULES:
         return GRADE_SINGLE
     return GRADE_CERTAIN if category in CERTAIN_CATEGORIES and rule not in BROAD_RULES else GRADE_BROAD
@@ -220,6 +226,7 @@ def grade(category: str, rule: str) -> str:
 
 # 입력 길이 상한. 넘으면 읽지 않고 막는다
 MAX_INPUT = 20_000
+MAX_DOCUMENT = 50_000
 # 검사 시간 상한(CPU 초). 넘기면 끝까지 못 본 글이므로 막는다. 벽시계로 재면 PC가 바쁠 때 판정이 달라진다.
 # 규칙은 반복 횟수를 묶어 여기까지 갈 일이 드물다
 TIME_LIMIT = 1.2
@@ -259,12 +266,17 @@ def _stopped(text: str, desc: str, signal: str) -> dict:
     return {"score": 100, "level": "위험", "hits": [hit], "signals": signals}
 
 
-def scan(text: str) -> dict:
+def scan(text: str, document: bool = False, schema_fields=None) -> dict:
     """입력 텍스트를 룰 레이어로 검사한다.
 
     normalize.views()가 만든 뷰 목록에 시그니처를 건다. 첫 뷰(기본 글)에서 맞으면 평문 적중,
     그 뒤 뷰에서 맞으면 난독 우회로 본다. 규칙 하나는 한 번만 센다.
     길이 상한을 넘은 글과 시간 상한 안에 다 보지 못한 글은 막는다. signals의 oversize, timed_out으로 구분한다.
+
+    document=True는 RAG 청크나 문서처럼 믿을 수 없는 글이다. docsignals.py의 신호를 더하고, 점수 합이 아니라
+    등급으로 판단한다. 확실한 규칙이 하나라도 맞으면 막고, 넓은 규칙은 몇 개가 맞아도 검토까지다.
+    글이 길수록 넓은 규칙이 쌓이기 쉬워서 점수 합으로 막으면 오탐이 된다.
+    schema_fields는 호출하는 쪽 출력 스키마의 필드 이름들이다. 문서가 출력 형식을 흉내 내면 잡는다.
 
     Returns:
         {
@@ -275,16 +287,19 @@ def scan(text: str) -> dict:
         }
     """
     text = text or ""
-    base = normalize.prepare(text) if len(text) <= MAX_INPUT else None
+    limit = MAX_DOCUMENT if document else MAX_INPUT
+    base = normalize.prepare(text) if len(text) <= limit else None
     # NFKC로 18배까지 늘어나는 글자가 있어 늘어난 길이도 잰다
-    if base is None or len(base) > MAX_INPUT:
-        return _stopped(text, f"입력이 {MAX_INPUT}자를 넘는다", "oversize")
+    if base is None or len(base) > limit:
+        return _stopped(text, f"입력이 {limit}자를 넘는다", "oversize")
     deadline = time.thread_time() + TIME_LIMIT
     views = normalize.views(base)
     hits: list[dict] = []
     encoded = False
 
     for rx, cat, w, desc, no_hangul in _SIGNATURES:
+        if document and desc in QUESTION_ONLY:
+            continue
         # '해당 장소'가 붙으면 '당장'이 되듯, 낱말 하나짜리 약한 신호는 복원 글에서 보지 않는다
         for n, (label, view, short) in enumerate(views[:1] if cat == C_URGENCY else views):
             if time.thread_time() > deadline:
@@ -297,6 +312,14 @@ def scan(text: str) -> dict:
                              "desc": f"{desc} (난독 우회: {label})" if n else desc})
                 break
 
+    if document:
+        for hit in docsignals.scan(views, deadline, schema_fields):
+            encoded = hit.pop("restored") or encoded
+            hit["grade"] = GRADE_CERTAIN if hit["weight"] >= BLOCK_THRESHOLD else GRADE_BROAD
+            hits.append(hit)
+        if time.thread_time() > deadline:
+            return _stopped(text, "검사가 시간 안에 끝나지 않았다", "timed_out")
+
     # 숨은 문자는 그 자체로 난독화 시도 신호다
     hidden = bool(normalize.hidden_chars(text))
     if hidden:
@@ -307,6 +330,10 @@ def scan(text: str) -> dict:
     # 단독 차단 규칙은 가중치 합과 상관없이 막는다
     if any(h["grade"] == GRADE_SINGLE for h in hits):
         score = max(score, BLOCK_THRESHOLD)
+    # 문서는 점수 합을 보지 않는다. 확실한 규칙이 있어야 막고, 없으면 몇 개가 맞아도 막지 않는다
+    if document:
+        certain = any(h["grade"] != GRADE_BROAD for h in hits)
+        score = max(score, BLOCK_THRESHOLD) if certain else min(score, BLOCK_THRESHOLD - 1)
     level = "위험" if score >= BLOCK_THRESHOLD else "의심" if score >= FLAG_THRESHOLD else "안전"
 
     # 위험도순 정렬

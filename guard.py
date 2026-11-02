@@ -22,8 +22,14 @@ DECISION_META = {
 }
 
 
-def evaluate(text: str, use_llm: bool = True, fail_closed: bool = False) -> dict:
+def evaluate(text: str, use_llm: bool = True, fail_closed: bool = False, document: bool = False,
+             schema_fields=None) -> dict:
     """입력을 다층으로 평가해 최종 판정을 돌려준다.
+
+    document=True는 사람이 친 말이 아니라 RAG 청크, 웹페이지, 메일, 공문서처럼 믿을 수 없는 글을 볼 때 쓴다.
+        글을 읽는 쪽에게 하는 지시를 더 보고, 점수 합이 아니라 규칙 등급으로 판단한다(rules.scan 참고).
+        길이 상한도 5만 자로 넓다. 규칙이 막은 글은 LLM에 묻지 않는다.
+    schema_fields: 문서 모드에서 호출하는 쪽 출력 스키마의 필드 이름들. 문서가 출력 형식을 흉내 내면 잡는다.
 
     fail_closed=False(기본): fail-open — 아무 신호도 없으면 '허용'.
     fail_closed=True: 의심스러우면 차단 원칙 — 입력을 **안전으로 확증**하지 못하면
@@ -44,12 +50,13 @@ def evaluate(text: str, use_llm: bool = True, fail_closed: bool = False) -> dict
         }
     """
     text = text or ""
-    rule = rules.scan(text)
+    rule = rules.scan(text, document=document, schema_fields=schema_fields)
 
     # 끝까지 보지 못한 글은 이미 막혔다. 길이 상한을 넘은 글을 LLM에 보내지 않는다
     unread = rule["signals"]["oversize"] or rule["signals"]["timed_out"]
+    settled = unread or (document and rule["score"] >= rules.BLOCK_THRESHOLD)
     llm = None
-    if use_llm and not unread and config.has_anthropic_key():
+    if use_llm and not settled and config.has_anthropic_key():
         llm = detector.classify(text)
 
     llm_ok = bool(llm and llm.get("ok"))
@@ -101,6 +108,7 @@ def evaluate(text: str, use_llm: bool = True, fail_closed: bool = False) -> dict
         "llm": llm,
         "reasons": reasons,
         "verified_safe": verified_safe,
+        "document": document,
         "layers": {"rule": rule_fired, "llm": llm_inj},
     }
 

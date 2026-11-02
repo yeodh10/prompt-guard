@@ -27,6 +27,7 @@ import time
 import streamlit as st
 
 import config
+import docsignals
 import guard
 import rules
 import samples
@@ -83,6 +84,7 @@ CAT_META = {
     rules.C_INDIRECT: ("RAG-INJ", "#2DD4BF"),   # 간접 주입(RAG/문서 내 지시)
     rules.C_CREDENTIAL: ("CRD-THF", "#FF5C7A"), # 자격증명 탈취 명령
     rules.C_LIMIT:    ("LIM-OVR", "#9AA3B2"),   # 길이/시간 상한 초과
+    docsignals.C_DOCUMENT: ("DOC-INJ", "#2DD4BF"),  # 문서 속 지시(문서 모드)
 }
 _DEFAULT_CAT = ("SIG-GEN", "#9AA3B2")
 
