@@ -49,7 +49,7 @@ def _unbounded(tree) -> bool:
 
 
 def test_no_unbounded_repeat_in_signatures():
-    bad = [desc for rx, _cat, _w, desc in rules._SIGNATURES if _unbounded(sre_parse.parse(rx.pattern))]
+    bad = [desc for rx, _cat, _w, desc, _h in rules._SIGNATURES if _unbounded(sre_parse.parse(rx.pattern))]
     assert not bad, bad
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import re
 import time
+import unicodedata
 
 import normalize
 
@@ -149,15 +150,14 @@ def _tight(pat: str) -> str:
     return pat.replace(r"\s+", r"\s{1,3}").replace(r"\s*", r"\s{0,3}")
 
 
-# 어떤 규칙에도 무제한 반복이 없다. tests/test_redos.py가 컴파일된 정규식을 뜯어 확인한다
+# 어떤 규칙에도 무제한 반복이 없다. tests/test_redos.py가 컴파일된 정규식을 뜯어 확인한다.
+# 끝의 참거짓은 규칙에 한글이 없는가다. 그런 규칙은 한글 덩어리를 줄인 글을 봐서 긴 한글 글에서 빠르다.
+# 입력은 NFKC를 거쳐 오므로 규칙도 같은 형태로 맞춘다
 _SIGNATURES = [
-    (re.compile(_tight(pat), re.IGNORECASE), cat, w, desc) for pat, cat, w, desc in _RAW_SIGNATURES
+    (re.compile(unicodedata.normalize("NFKC", _tight(pat)), re.IGNORECASE), cat, w, desc, not normalize.HANGUL.search(pat))
+    for pat, cat, w, desc in _RAW_SIGNATURES
 ]
 
-# 제로폭/보이지 않는 문자(난독화에 자주 쓰임)
-_ZERO_WIDTH = re.compile(r"[​‌‍⁠﻿­]")
-# 변이 선택자(VS)·태그 문자 — 제로폭처럼 글자 사이에 끼우는 스머글링(난독화 신호)
-_VS_TAGS = re.compile("[︀-️\U000E0000-\U000E01EF]")
 # base64로 의심되는 긴 토큰
 _B64 = re.compile(r"[A-Za-z0-9+/]{16,4096}={0,2}")
 
@@ -202,71 +202,53 @@ def _stopped(text: str, desc: str, signal: str) -> dict:
     """끝까지 보지 못한 글의 결과. 안전을 확인하지 못했으므로 막는다."""
     signals = {"zero_width": False, "encoded": False, "length": len(text), "oversize": False, "timed_out": False}
     signals[signal] = True
-    hit = {"category": C_LIMIT, "weight": 100, "desc": desc, "snippet": ""}
+    hit = {"category": C_LIMIT, "weight": 100, "rule": desc, "desc": desc, "snippet": ""}
     return {"score": 100, "level": "위험", "hits": [hit], "signals": signals}
 
 
 def scan(text: str) -> dict:
     """입력 텍스트를 룰 레이어로 검사한다.
 
+    normalize.views()가 만든 뷰 목록에 시그니처를 건다. 첫 뷰(기본 글)에서 맞으면 평문 적중,
+    그 뒤 뷰에서 맞으면 난독 우회로 본다. 규칙 하나는 한 번만 센다.
     길이 상한을 넘은 글과 시간 상한 안에 다 보지 못한 글은 막는다. signals의 oversize, timed_out으로 구분한다.
 
     Returns:
         {
           "score": int(0~100),
           "level": "안전" | "의심" | "위험",
-          "hits": [{"category","weight","desc","snippet"} ...],
+          "hits": [{"category","weight","desc","rule","snippet"} ...],
           "signals": {"zero_width": bool, "encoded": bool, "length": int, "oversize": bool, "timed_out": bool},
         }
     """
     text = text or ""
-    if len(text) > MAX_INPUT:
+    base = normalize.prepare(text) if len(text) <= MAX_INPUT else None
+    # NFKC로 18배까지 늘어나는 글자가 있어 늘어난 길이도 잰다
+    if base is None or len(base) > MAX_INPUT:
         return _stopped(text, f"입력이 {MAX_INPUT}자를 넘는다", "oversize")
     deadline = time.thread_time() + TIME_LIMIT
+    views = normalize.views(base)
     hits: list[dict] = []
-    seen_cat_desc = set()
-
-    def add(category, weight, desc, snippet):
-        key = (category, desc)
-        if key in seen_cat_desc:
-            return
-        seen_cat_desc.add(key)
-        hits.append({"category": category, "weight": weight, "desc": desc, "snippet": snippet})
-
-    # 1) 평문 시그니처. 공백 덩어리를 먼저 줄인다
-    squeezed = normalize.squeeze(text)
-    for rx, cat, w, desc in _SIGNATURES:
-        if time.thread_time() > deadline:
-            return _stopped(text, "검사가 시간 안에 끝나지 않았다", "timed_out")
-        m = rx.search(squeezed)
-        if m:
-            add(cat, w, desc, _snippet(squeezed, m))
-
-    # 2) 역난독화: 정규화·리트스피크·공백복원·인코딩 디코드 뷰에서 시그니처 재검사
-    #    (평문에서 이미 잡힌 시그니처는 건너뛰어 이중 가산을 막는다)
-    raw_keys = set(seen_cat_desc)
-    deobf_added: set = set()
     encoded = False
-    views = normalize.deobfuscated_views(text)
-    for rx, cat, w, desc in _SIGNATURES:
-        if cat not in (C_OVERRIDE, C_LEAK, C_ROLEPLAY, C_EXFIL, C_REFUSAL, C_INDIRECT):
-            continue
-        if (cat, desc) in raw_keys or (cat, desc) in deobf_added:
-            continue
-        for label, view in views:
+
+    for rx, cat, w, desc, no_hangul in _SIGNATURES:
+        # '해당 장소'가 붙으면 '당장'이 되듯, 낱말 하나짜리 약한 신호는 복원 글에서 보지 않는다
+        for n, (label, view, short) in enumerate(views[:1] if cat == C_URGENCY else views):
             if time.thread_time() > deadline:
                 return _stopped(text, "검사가 시간 안에 끝나지 않았다", "timed_out")
-            if rx.search(view):
-                encoded = True
-                deobf_added.add((cat, desc))
-                add(cat, w, f"{desc} (난독 우회: {label})",
-                    view[:48] + ("…" if len(view) > 48 else ""))
+            m = rx.search(short if no_hangul else view)
+            if m:
+                m = rx.search(view) or m
+                encoded = encoded or n > 0
+                hits.append({"category": cat, "weight": w, "rule": desc, "snippet": _snippet(m.string, m),
+                             "desc": f"{desc} (난독 우회: {label})" if n else desc})
                 break
 
-    # 3) 제로폭/보이지 않는 문자(그 자체로 난독화 시도 신호)
-    zero_width = bool(_ZERO_WIDTH.search(text) or _VS_TAGS.search(text))
-    if zero_width:
-        add(C_ENCODE, 25, "보이지 않는 제로폭 문자(난독화)", "(zero-width chars)")
+    # 숨은 문자는 그 자체로 난독화 시도 신호다
+    hidden = bool(normalize.hidden_chars(text))
+    if hidden:
+        hits.append({"category": C_ENCODE, "weight": 25, "rule": "숨은 문자", "desc": "보이지 않는 제로폭 문자(난독화)",
+                     "snippet": "(zero-width chars)"})
 
     score = min(100, sum(h["weight"] for h in hits))
     level = "위험" if score >= BLOCK_THRESHOLD else "의심" if score >= FLAG_THRESHOLD else "안전"
@@ -277,7 +259,7 @@ def scan(text: str) -> dict:
         "score": score,
         "level": level,
         "hits": hits,
-        "signals": {"zero_width": zero_width, "encoded": encoded, "length": len(text), "oversize": False, "timed_out": False},
+        "signals": {"zero_width": hidden, "encoded": encoded, "length": len(text), "oversize": False, "timed_out": False},
     }
 
 
@@ -299,7 +281,7 @@ def _try_decode(token: str) -> str | None:
 def _decoded_is_attack(dec: str) -> bool:
     return any(
         cat in (C_OVERRIDE, C_LEAK, C_ROLEPLAY, C_EXFIL) and rx.search(dec)
-        for rx, cat, _w, _d in _SIGNATURES
+        for rx, cat, _w, _d, _h in _SIGNATURES
     )
 
 
@@ -314,7 +296,7 @@ def detect_spans(text: str) -> list[dict]:
     raw: list[tuple[int, int, str, int]] = []
     deadline = time.thread_time() + TIME_LIMIT
 
-    for rx, cat, w, _desc in _SIGNATURES:
+    for rx, cat, w, _desc, _h in _SIGNATURES:
         if time.thread_time() > deadline:
             break
         for m in rx.finditer(text):
@@ -329,9 +311,11 @@ def detect_spans(text: str) -> list[dict]:
         if dec and _decoded_is_attack(dec):
             raw.append((m.start(), m.end(), C_ENCODE, 60))
 
-    # 제로폭 문자 각각도 구간으로
-    for m in _ZERO_WIDTH.finditer(text):
-        raw.append((m.start(), m.end(), C_ENCODE, 25))
+    # 숨은 문자 각각도 구간으로
+    hidden = normalize.hidden_chars(text)
+    if hidden:
+        for m in re.finditer("[" + re.escape("".join(hidden)) + "]", text):
+            raw.append((m.start(), m.end(), C_ENCODE, 25))
 
     if not raw:
         return []
